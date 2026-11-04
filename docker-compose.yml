@@ -24,6 +24,8 @@ services:
       PORT: 8787
       # 可选：主密钥（面板密钥之外的后门 key）；一般留空用面板建的 key
       GATEWAY_KEY: ""
+      # 可选：面板登录口令（不设则首次启动自动生成并打印在日志里一次，存 data/panel-auth.json）
+      # PANEL_PASSWORD: "change-me"
       # 上游与模型（一般不用改）
       ZCODE_UPSTREAM_ORIGIN: "https://zcode.z.ai"
       ZCODE_MODEL: "GLM-5.3-Flash"

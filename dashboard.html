@@ -393,6 +393,14 @@
     padding: 12px 14px; font-size: 12px; overflow-x: auto; margin: 8px 0 0; color: var(--text-primary);
     font-family: ui-monospace, "SF Mono", Consolas, monospace; word-break: break-all; white-space: pre-wrap;
   }
+  /* ── 面板登录层 ── */
+  #login-overlay { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center; background: rgba(20, 20, 19, 0.45); backdrop-filter: blur(6px); }
+  #login-overlay[hidden] { display: none; }
+  .login-card { width: min(360px, calc(100vw - 48px)); background: var(--bg-surface-inner); border: 1px solid var(--border-strong); border-radius: 14px; padding: 28px; box-shadow: 0 12px 40px rgba(20, 20, 19, 0.18); }
+  .login-card h2 { margin: 0 0 4px; font-size: 17px; }
+  .login-sub { margin: 0 0 18px; color: var(--text-secondary); font-size: 12.5px; }
+  .login-card input { width: 100%; box-sizing: border-box; margin-bottom: 12px; }
+  .login-hint { margin: 14px 0 0; color: var(--text-muted); font-size: 11.5px; line-height: 1.6; }
 </style>
 </head>
 <body>
@@ -409,6 +417,10 @@
   <button class="pill-btn" id="btn-privacy" type="button" aria-label="切换隐私模式（脱敏）" title="隐私模式：脱敏邮箱/手机号/昵称，方便截图分享">
     <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
     <span id="lbl-privacy">隐私模式</span>
+  </button>
+  <button class="pill-btn" id="btn-logout" type="button" aria-label="退出面板登录" title="退出面板登录">
+    <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+    <span>退出</span>
   </button>
   <div class="seg" role="tablist" aria-label="账号归属筛选">
     <button type="button" data-realm-tab="all" aria-pressed="true">全部 <span class="num" id="tab-cnt-all">0</span></button>
@@ -847,6 +859,17 @@
   </div>
 </nav>
 
+<div id="login-overlay" hidden>
+  <div class="login-card" role="dialog" aria-label="面板登录">
+    <h2>ZCode2API 控制台</h2>
+    <p class="login-sub">管理接口需要登录，请输入面板口令</p>
+    <form id="login-form">
+      <input id="login-password" type="password" autocomplete="current-password" placeholder="面板口令" required>
+      <button class="btn btn-brand" id="login-submit" type="submit" style="width:100%">登录</button>
+    </form>
+    <p class="login-hint">口令在网关启动日志中查看：首次启动会自动生成并打印一次；也可以用环境变量 <code>PANEL_PASSWORD</code> 指定。忘记口令时删除 <code>data/panel-auth.json</code> 后重启重新生成。</p>
+  </div>
+</div>
 <div id="toasts" role="status" aria-live="polite"></div>
 
 <script>
@@ -940,6 +963,11 @@ function toast(kind, title, body) {
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
+  // 面板会话失效：弹登录层（登录接口自身的 401 不算）
+  if (r.status === 401 && !path.startsWith('/panel/')) {
+    showLogin();
+    throw new Error('需要面板登录');
+  }
   const text = await r.text();
   let data;
   try { data = text ? JSON.parse(text) : {}; } catch { throw new Error(`服务端响应异常（HTTP ${r.status}）`); }
@@ -948,6 +976,38 @@ async function api(path, opts) {
 }
 const postJson = (path, body) => api(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}) });
 
+/* ── 面板登录 ── */
+function showLogin() {
+  const ov = $('#login-overlay');
+  if (ov.hidden) {
+    ov.hidden = false;
+    $('#login-password').focus();
+  }
+}
+async function doLogin(e) {
+  e.preventDefault();
+  const pw = $('#login-password').value;
+  const btn = $('#login-submit');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/panel/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: pw }) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `登录失败（HTTP ${r.status}）`);
+    $('#login-overlay').hidden = true;
+    $('#login-password').value = '';
+    goTab(state.tab || 'dashboard', false);
+  } catch (err) {
+    toast('err', '登录失败', err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+$('#login-form').addEventListener('submit', doLogin);
+$('#btn-logout').onclick = async () => {
+  try { await fetch('/panel/logout', { method: 'POST' }); } catch {}
+  showLogin();
+};
+
 /* ── 路由 ── */
 function goTab(name, push = true) {
   if (!['dashboard', 'accounts', 'keys', 'stats', 'security'].includes(name)) name = 'dashboard';
@@ -955,7 +1015,7 @@ function goTab(name, push = true) {
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === `panel-${name}`));
   $$('.dock-btn[data-dock]').forEach((b) => b.classList.toggle('active', b.dataset.dock === name));
   if (push && location.hash !== `#/${name}`) history.replaceState(null, '', `#/${name}`);
-  loadTab(name).catch((e) => toast('err', '加载失败', e.message));
+  loadTab(name).catch((e) => { if ($('#login-overlay').hidden) toast('err', '加载失败', e.message); });
 }
 
 async function loadTab(name) {

@@ -239,6 +239,7 @@ weight = (余额占比 ×10 + 闲置补偿 0.5/h 封顶5 + 成功率 ×3) × 账
 |---|---|---|
 | `HOST` / `PORT` | `0.0.0.0` / `8787` | 监听地址 |
 | `GATEWAY_KEY` | 空 | 主密钥（面板密钥之外的备份通道） |
+| `PANEL_PASSWORD` | 自动生成 | 面板登录口令；不设则首次启动自动生成、只在日志打印一次（存 `data/panel-auth.json`，删文件重启即重置） |
 | `ZCGW_DATA_DIR` | 程序目录 | 数据目录（Docker 里指 `/app/data`） |
 | `ZCGW_MAX_INFLIGHT` | `5` | 单号在途上限 |
 | `ZCGW_TOPN` | `3` | 加权随机候选窗口 |
@@ -263,6 +264,7 @@ weight = (余额占比 ×10 + 闲置补偿 0.5/h 封顶5 + 成功率 ×3) × 账
 | `data/pool-state.json` | 冷却 / 成功率状态（重启恢复） |
 | `data/security.json` | IP 管控规则 + 拦截审计（500 条环形） |
 | `data/onboard-flows.json` | 进行中的登录授权流（重启不丢） |
+| `data/panel-auth.json` | 面板登录口令哈希（scrypt；删除后重启重新生成） |
 | `zcode-profile.json` | ZCode 客户端指纹档案（请求头基底 + 官方 system 原文；公开仓库已脱敏运行时痕迹字段） |
 
 > 示例文件见 `data/*.example.json`。备份 = 打包整个 `data/` 目录。
@@ -271,6 +273,7 @@ weight = (余额占比 ×10 + 闲置补偿 0.5/h 封顶5 + 成功率 ×3) × 账
 
 ## 安全说明
 
+- **面板登录**：所有管理接口（`/pool` `/keys` `/accounts/*` `/security` 等）需要登录会话；口令来自 `PANEL_PASSWORD` 环境变量或首次启动自动生成；本机回环（SSH 隧道）免登录；同 IP 连错 5 次锁 15 分钟
 - 密钥只在创建时显示一次，库里只存 SHA-256 哈希；账号凭据不返回前端
 - 存在 ≥1 把密钥即强制鉴权；**删光密钥只放行 `127.0.0.1`**（openMode 防裸奔设计），外部一律 401
 - 入站 IP 黑 / 白名单（支持 IPv4/IPv6 CIDR）；拦截审计保留 IP / 路径 / UA / 原因

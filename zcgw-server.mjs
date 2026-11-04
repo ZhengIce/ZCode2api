@@ -804,8 +804,13 @@ function publicKey(k) {
 
 function clientIp(req) {
   if (!req || !req.headers) return '';
-  const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-  let ip = xff || req.socket?.remoteAddress || '';
+  const peer = req.socket?.remoteAddress || '';
+  // X-Forwarded-For 只在同机反代（TCP 对端是回环）时可信；
+  // 端口直连时外部可伪造该头冒充本机，绕过 IP 管控与面板登录
+  const peerNorm = peer.startsWith('::ffff:') ? peer.slice(7) : peer;
+  const trustXff = peerNorm === '127.0.0.1' || peer === '::1';
+  const xff = trustXff ? String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() : '';
+  let ip = xff || peerNorm;
   if (ip.startsWith('::ffff:')) ip = ip.slice(7);
   return ip;
 }
@@ -924,6 +929,98 @@ function authenticate(req, model) {
     return { ok: false, status: 403, message: `该 Key 不允许使用模型 ${model}` };
   }
   return { ok: true, key: k };
+}
+
+// ── 面板登录：管理接口的唯一鉴权层（/pool /keys /accounts/* /security 等）──
+// 口令来源：PANEL_PASSWORD 环境变量 > data/panel-auth.json > 首次启动自动生成（明文只打一次日志）
+const PANEL_AUTH_FILE = path.join(DATA_DIR, 'panel-auth.json');
+const PANEL_COOKIE = 'zcgw_panel';
+const PANEL_SESSION_MS = 7 * 86400_000; // 会话 7 天
+const panelSessions = new Map(); // token -> 过期时间（内存态：重启即全部下线）
+const panelFails = new Map();    // ip -> { count, until }（防爆破：15 分钟错 5 次锁定）
+
+function scryptHash(pw, salt) {
+  return crypto.scryptSync(String(pw), salt, 32).toString('hex');
+}
+
+const panelCred = (() => {
+  const env = process.env.PANEL_PASSWORD;
+  if (env) return { salt: 'env', hash: scryptHash(env, 'env') };
+  try {
+    const j = JSON.parse(fs.readFileSync(PANEL_AUTH_FILE, 'utf8'));
+    if (j.hash && j.salt) return j;
+  } catch {}
+  const pw = crypto.randomBytes(12).toString('base64url');
+  const salt = crypto.randomBytes(16).toString('hex');
+  const cred = { salt, hash: scryptHash(pw, salt) };
+  try { fs.writeFileSync(PANEL_AUTH_FILE, JSON.stringify(cred, null, 2)); } catch {}
+  console.log('══════════════════════════════════════════════════');
+  console.log(`  面板登录口令（只显示这一次）：${pw}`);
+  console.log('  忘记口令：删除 data/panel-auth.json 后重启重新生成');
+  console.log('  也可用环境变量 PANEL_PASSWORD 固定指定');
+  console.log('══════════════════════════════════════════════════');
+  return cred;
+})();
+
+function panelVerify(pw) {
+  const a = Buffer.from(scryptHash(pw, panelCred.salt), 'hex');
+  const b = Buffer.from(panelCred.hash, 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function parseCookies(req) {
+  const out = {};
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+  }
+  return out;
+}
+
+/** 面板鉴权：本机回环（SSH 隧道 / 容器内定时任务）免登录，其余要会话 Cookie */
+function panelAuthOk(req) {
+  const ip = clientIp(req);
+  if (ip === '127.0.0.1' || ip === '::1') return true;
+  const token = parseCookies(req)[PANEL_COOKIE];
+  if (!token) return false;
+  const exp = panelSessions.get(token);
+  if (!exp || exp < Date.now()) {
+    panelSessions.delete(token);
+    return false;
+  }
+  panelSessions.set(token, Date.now() + PANEL_SESSION_MS); // 滚动续期
+  return true;
+}
+
+async function handlePanelLogin(req, res) {
+  const ip = clientIp(req);
+  const raw = await readBody(req);
+  let body = {};
+  try { body = raw.length ? JSON.parse(raw.toString('utf8')) : {}; } catch {}
+  const fl = panelFails.get(ip);
+  if (fl && fl.until > Date.now()) {
+    return sendJson(res, 429, { error: `尝试次数过多，${Math.ceil((fl.until - Date.now()) / 60000)} 分钟后再试` });
+  }
+  if (!panelVerify(String(body.password ?? ''))) {
+    const count = (fl?.count || 0) + 1;
+    if (count >= 5) panelFails.set(ip, { count, until: Date.now() + 15 * 60_000 });
+    else panelFails.set(ip, { count, until: 0 });
+    log(`[panel] 登录失败：ip=${ip} 第 ${count} 次`);
+    return sendJson(res, 401, { error: '口令错误' });
+  }
+  panelFails.delete(ip);
+  const token = crypto.randomBytes(32).toString('hex');
+  panelSessions.set(token, Date.now() + PANEL_SESSION_MS);
+  log(`[panel] 登录成功：ip=${ip}`);
+  res.setHeader('set-cookie', `${PANEL_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${PANEL_SESSION_MS / 1000}`);
+  return sendJson(res, 200, { ok: true });
+}
+
+function handlePanelLogout(req, res) {
+  const token = parseCookies(req)[PANEL_COOKIE];
+  if (token) panelSessions.delete(token);
+  res.setHeader('set-cookie', `${PANEL_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+  return sendJson(res, 200, { ok: true });
 }
 
 // ── 用量采集（内存环形 + jsonl 落盘）──
@@ -2227,6 +2324,18 @@ const server = http.createServer((req, res) => {
       models: [DEFAULT_MODEL],
     });
   }
+  if (req.method === 'POST' && url.pathname === '/panel/login') return handlePanelLogin(req, res);
+  if (req.method === 'POST' && url.pathname === '/panel/logout') return handlePanelLogout(req, res);
+  // 面板管理接口统一鉴权。放行：静态页 / 健康检查 / 登录登出 / 对外 /v1 API（有自己的密钥鉴权）
+  {
+    const p = url.pathname;
+    const isOpen =
+      p === '/' || p === '/dashboard' || p === '/health' || p.startsWith('/panel/') ||
+      p === '/models' || p === '/messages' || p === '/chat/completions' || p.startsWith('/v1/');
+    if (!isOpen && !panelAuthOk(req)) {
+      return sendJson(res, 401, { error: '需要面板登录' });
+    }
+  }
   if (req.method === 'GET' && url.pathname === '/pool/settings') {
     return sendJson(res, 200, {
       settings: {
@@ -2341,6 +2450,7 @@ server.listen(PORT, HOST, () => {
   log(`zcgw-server listening on http://${HOST}:${PORT}`);
   log(`accounts: ${accounts.map((a) => a.label).join(', ')}`);
   log(`gateway key: ${GATEWAY_KEY ? '(set)' : '(WARNING: 未设置，任何人可用)'}`);
+  log(`panel login: 已启用（本机回环免登录；口令来源：${process.env.PANEL_PASSWORD ? 'PANEL_PASSWORD 环境变量' : 'data/panel-auth.json（首次启动自动生成）'}）`);
   log(`scheduler: weighted-random topN=${POOL.topN} sticky=${POOL.stickyTtlMin}min`);
 
   // 服务器生产环境自检提示（一次性）
