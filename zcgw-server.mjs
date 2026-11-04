@@ -255,11 +255,14 @@ function loadAccounts() {
 
   const jwt = localJwt();
   if (!jwt) {
-    console.error('既没有 accounts.json，也没有本地 ZCode 登录态。');
-    console.error('先打开 ZCode 客户端登录一次，或用面板的登录按钮纳管账号。');
-    process.exit(1);
+    // 服务器冷启动：没有账号也照常起服务（面板纳管第一个号的唯一入口就是这里）。
+    // 千万不能 process.exit —— restart: unless-stopped 会无限拉起，形成重启死循环。
+    console.error('没有 accounts.json，也没有本地 ZCode 登录态 —— 以空账号池启动。');
+    console.error('打开面板「账号」页，用设备授权流或粘贴 Token 纳管第一个账号。');
+    return [];
   }
-  log('未找到 accounts.json，使用本地 ZCode 客户端凭证（单账号模式）');
+  // 这里还在模块初始化阶段，log（第 660 行的 const）尚未初始化，必须用 console
+  console.log('未找到 accounts.json，使用本地 ZCode 客户端凭证（单账号模式）');
   const uid = userIdFromJwt(jwt);
   return [
     {
@@ -1100,6 +1103,9 @@ async function handleOpenAIChat(req, res) {
     return sendJson(res, auth.status, { error: { message: auth.message, type: 'authentication_error' } });
   }
   const reqKey = auth.key;
+  if (!accounts.length) {
+    return sendJson(res, 503, { error: { message: '账号池为空：请先在面板「账号」页纳管账号', type: 'api_error' } });
+  }
   const startedAt = Date.now();
   const basePayload = buildUpstreamBody(inbound, { uid: 'placeholder' });
   // OpenAI 入口永远非流式转换（stream:true 的 OpenAI 客户端后续再做 SSE 转发）
@@ -1197,6 +1203,9 @@ async function handleMessages(req, res) {
     });
   }
   const reqKey = auth.key;
+  if (!accounts.length) {
+    return sendJson(res, 503, { type: 'error', error: { type: 'api_error', message: '账号池为空：请先在面板「账号」页纳管账号' } });
+  }
   const startedAt = Date.now();
   const basePayload = buildUpstreamBody(inbound, { uid: 'placeholder' });
   const sessionKey = sessionKeyOf(req, inbound);
