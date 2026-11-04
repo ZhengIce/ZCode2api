@@ -17,7 +17,7 @@ services:
     container_name: zcgw
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8787:8787"   # 只本机 nginx 反代；如需直连 IP:8787 改回 "8787:8787"
+      - "9090:8787"   # 宿主机 9090 -> 容器 8787（公网可访问）；要只绑本机改回 "127.0.0.1:9090:8787"
     environment:
       # 监听容器内 0.0.0.0（必须，docker 端口映射依赖它）
       HOST: 0.0.0.0
